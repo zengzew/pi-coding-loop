@@ -1,6 +1,7 @@
 import {
   ModelRuntime,
   SessionManager,
+  SettingsManager,
   createAgentSession,
   defineTool,
   type AgentSession,
@@ -28,9 +29,18 @@ interface UsageObservation {
   usage: unknown;
 }
 
+interface CompactionObservation {
+  starts: number;
+  ends: number;
+  reason: "manual" | "threshold" | "overflow" | undefined;
+  aborted: boolean | undefined;
+  errorMessage: string | undefined;
+}
+
 const results: Record<string, SpikeResult> = {
   "DeepSeek provider resolution": skipped("DeepSeek checks were not started."),
   "DeepSeek session reuse": skipped("DeepSeek checks were not started."),
+  "DeepSeek context compaction": skipped("DeepSeek checks were not started."),
   "DeepSeek usage visibility": skipped("DeepSeek checks were not started."),
   "Kimi provider resolution": skipped("Kimi checks were not started."),
   "Reviewer tool allowlist": skipped("Kimi checks were not started."),
@@ -81,6 +91,7 @@ async function runDeepSeekChecks(modelRuntime: ModelRuntime, fixtureDir: string)
     const evidence = `Missing ${missing.join(", ")}; no DeepSeek provider call was made.`;
     results["DeepSeek provider resolution"] = skipped(evidence);
     results["DeepSeek session reuse"] = skipped(evidence);
+    results["DeepSeek context compaction"] = skipped(evidence);
     results["DeepSeek usage visibility"] = skipped(evidence);
     return;
   }
@@ -88,6 +99,13 @@ async function runDeepSeekChecks(modelRuntime: ModelRuntime, fixtureDir: string)
   let session: AgentSession | undefined;
   let unsubscribe: (() => void) | undefined;
   const usageEvents: UsageObservation[] = [];
+  const compactionEvents: CompactionObservation = {
+    starts: 0,
+    ends: 0,
+    reason: undefined,
+    aborted: undefined,
+    errorMessage: undefined,
+  };
   try {
     await modelRuntime.setRuntimeApiKey("deepseek", apiKey, { allowNetwork: false });
     const model = resolveConfiguredModel(modelRuntime, "deepseek", configuredModel);
@@ -99,8 +117,15 @@ async function runDeepSeekChecks(modelRuntime: ModelRuntime, fixtureDir: string)
       modelRuntime,
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       sessionManager: SessionManager.inMemory(fixtureDir),
+      settingsManager: SettingsManager.inMemory({
+        compaction: {
+          enabled: true,
+          reserveTokens: 1_024,
+          keepRecentTokens: 1,
+        },
+      }),
     }));
-    unsubscribe = observeUsage("DeepSeek", session, usageEvents);
+    unsubscribe = observeSession("DeepSeek", session, usageEvents, compactionEvents);
     const originalSessionId = session.sessionId;
 
     await session.prompt(
@@ -125,6 +150,53 @@ async function runDeepSeekChecks(modelRuntime: ModelRuntime, fixtureDir: string)
     }
     results["DeepSeek session reuse"] = passed(
       `Two prompts completed in session ${originalSessionId}; the second corrected the first change.`,
+    );
+
+    const compaction = await session.compact(
+      "Preserve the current task, file changes, and verifier feedback needed to continue safely.",
+    );
+    if (
+      session.sessionId !== originalSessionId ||
+      !compaction.summary.trim() ||
+      compaction.tokensBefore <= 0 ||
+      compactionEvents.starts !== 1 ||
+      compactionEvents.ends !== 1 ||
+      compactionEvents.reason !== "manual" ||
+      compactionEvents.aborted !== false ||
+      compactionEvents.errorMessage
+    ) {
+      throw new Error(
+        compactionEvents.errorMessage ??
+          "Manual compaction did not produce the expected result and event sequence.",
+      );
+    }
+
+    await session.prompt(
+      [
+        "Continue implementing using the new verifier evidence below.",
+        "",
+        "Immutable task requirements:",
+        "- fixture.txt must contain exactly state=delta followed by a newline.",
+        "- Do not create other files.",
+        "",
+        "New verifier evidence:",
+        "The current value state=gamma is stale. Re-inspect the file and make the smallest correction.",
+      ].join("\n"),
+    );
+    const postCompactionContent = await readFile(join(fixtureDir, "fixture.txt"), "utf8");
+    if (session.sessionId !== originalSessionId || postCompactionContent !== "state=delta\n") {
+      throw new Error(
+        latestProviderError(usageEvents) ??
+          "The post-compaction feedback turn did not satisfy the repeated immutable requirements.",
+      );
+    }
+    results["DeepSeek context compaction"] = passed(
+      [
+        `Manual compaction completed in session ${originalSessionId}`,
+        `with ${compaction.tokensBefore} tokens before compaction`,
+        `and ${compaction.estimatedTokensAfter ?? "unknown"} estimated after;`,
+        "the next feedback repeated the immutable requirements and produced state=delta.",
+      ].join(" "),
     );
 
     const stats = session.getSessionStats();
@@ -185,7 +257,7 @@ async function runKimiChecks(modelRuntime: ModelRuntime, fixtureDir: string): Pr
       customTools: [submitReviewTool],
       sessionManager: SessionManager.inMemory(fixtureDir),
     }));
-    unsubscribe = observeUsage("Kimi", session, usageEvents);
+    unsubscribe = observeSession("Kimi", session, usageEvents);
 
     const activeTools = session.getActiveToolNames().sort();
     const expectedTools = ["find", "grep", "ls", "read", "submit_review"];
@@ -244,10 +316,11 @@ function resolveConfiguredModel(
   return model;
 }
 
-function observeUsage(
+function observeSession(
   label: string,
   session: AgentSession,
   usageEvents: UsageObservation[],
+  compactionEvents?: CompactionObservation,
 ): () => void {
   return session.subscribe((event) => {
     if (event.type === "message_end" && event.message.role === "assistant") {
@@ -264,6 +337,16 @@ function observeUsage(
       };
       usageEvents.push(observation);
       console.log(`[${label}] usage`, observation);
+    }
+    if (event.type === "compaction_start" && compactionEvents) {
+      compactionEvents.starts++;
+      compactionEvents.reason = event.reason;
+    }
+    if (event.type === "compaction_end" && compactionEvents) {
+      compactionEvents.ends++;
+      compactionEvents.reason = event.reason;
+      compactionEvents.aborted = event.aborted;
+      compactionEvents.errorMessage = event.errorMessage;
     }
   });
 }
@@ -285,6 +368,7 @@ function markUnfinishedDeepSeekFailed(error: unknown): void {
   for (const check of [
     "DeepSeek provider resolution",
     "DeepSeek session reuse",
+    "DeepSeek context compaction",
     "DeepSeek usage visibility",
   ]) {
     if (results[check]?.status !== "PASS") results[check] = failed(evidence);
@@ -323,6 +407,7 @@ ${rows}
 - The current SDK expects an explicit \`Model\` object. This spike resolves it through \`ModelRuntime.create()\` and \`modelRuntime.getModel(provider, modelId)\`, then passes both \`modelRuntime\` and \`model\` to \`createAgentSession()\`.
 - \`SessionManager.inMemory()\` accepts an optional working directory; this spike passes the fixture directory.
 - Active tool names can be asserted directly with \`session.getActiveToolNames()\`.
+- Manual context compaction is exercised through \`session.compact()\` with an in-memory low \`keepRecentTokens\` threshold so the disposable spike triggers the real provider-backed summarization path deterministically.
 - Runtime API keys are installed with \`allowNetwork: false\`; the packaged model catalog is sufficient for configured model resolution and avoids an unrelated remote-catalog refresh blocking session startup.
 - Per-call provider/model/usage is observed from assistant \`message_end\` events; aggregate tokens and reported cost are available through \`session.getSessionStats()\`.
 `;
