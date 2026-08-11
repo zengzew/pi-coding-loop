@@ -96,6 +96,17 @@ function fakeSession() {
     abort: vi.fn(async () => undefined),
     dispose: vi.fn(),
     getActiveToolNames: vi.fn(() => ["read", "bash", "edit", "write", "grep", "find", "ls"]),
+    getSessionStats: vi.fn(() => ({
+      sessionFile: undefined,
+      sessionId: "session-1",
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      cost: 0,
+    })),
     subscribe: vi.fn((nextListener: (event: any) => void) => {
       listener = nextListener;
       return unsubscribe;

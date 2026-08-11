@@ -59,6 +59,26 @@ describe("runVerification", () => {
     expect(result.durationMs).toBeLessThan(2_000);
   });
 
+  it("terminates the active command when the run abort signal fires", async () => {
+    const fixture = await createFixture();
+    const controller = new AbortController();
+    const running = runVerification({
+      repoRoot: fixture.repoRoot,
+      artifacts: { runDirectory: fixture.runDirectory },
+      config: verificationConfig([
+        { name: "abort", command: nodeCommand("setInterval(() => {}, 1_000)"), timeoutMs: 5_000 },
+      ]),
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 50);
+
+    const result = await running;
+
+    expect(result.passed).toBe(false);
+    expect(result.failedCheck).toMatchObject({ timedOut: false, passed: false });
+    expect(result.durationMs).toBeLessThan(2_000);
+  });
+
   it("bounds model output by head lines, tail lines, and character count", async () => {
     const fixture = await createFixture();
     const lines = Array.from({ length: 8 }, (_, index) => `line-${index}`).join("\n");

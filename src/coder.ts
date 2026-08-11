@@ -7,6 +7,7 @@ import {
   getAgentDir,
   type AgentSession,
   type AgentSessionEvent,
+  type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -35,6 +36,7 @@ type CoderAgentSession = Pick<
   | "abort"
   | "dispose"
   | "getActiveToolNames"
+  | "getSessionStats"
   | "subscribe"
 >;
 
@@ -56,6 +58,10 @@ export class DeepSeekCoder {
 
   get activeToolNames(): string[] {
     return this.session.getActiveToolNames();
+  }
+
+  get stats(): SessionStats {
+    return this.session.getSessionStats();
   }
 
   async run(input: CoderTurnInput): Promise<void> {

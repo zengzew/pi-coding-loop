@@ -4,21 +4,25 @@
   "private": true,
   "description": "A deterministic coding loop built on the Pi Agent SDK.",
   "type": "module",
+  "bin": {
+    "pi-loop": "dist/src/cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "spike": "node --import tsx spike/pi-integration.ts",
     "spike:coder": "node --import tsx spike/coder-integration.ts",
-    "spike:feedback": "node --import tsx spike/coder-verifier-loop.ts"
+    "spike:feedback": "node --import tsx spike/coder-verifier-loop.ts",
+    "pi-loop": "node --import tsx src/cli.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.82.1",
+    "tsx": "^4.20.6",
     "typebox": "^1.0.58"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
-    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },

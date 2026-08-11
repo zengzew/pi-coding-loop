@@ -49,6 +49,24 @@ export interface RunArtifacts {
   eventsPath: string;
 }
 
+export interface ModelTelemetry {
+  provider: string;
+  model: string;
+  messages: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reportedCost: number | "unknown";
+}
+
+export interface RunTelemetry {
+  coder: ModelTelemetry;
+  reviewer: ModelTelemetry;
+  verifierRuns: number;
+  failedChecks: number;
+}
+
 export interface VerificationFeedback {
   type: "verification_failure";
   failedCheck: string;

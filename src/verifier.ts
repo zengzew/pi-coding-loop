@@ -20,6 +20,7 @@ export interface RunVerificationOptions {
   repoRoot: string;
   artifacts: Pick<RunArtifacts, "runDirectory">;
   config: PiLoopConfig["verification"];
+  signal?: AbortSignal;
 }
 
 export async function runVerification(
@@ -40,6 +41,7 @@ export async function runVerification(
       maxModelOutputChars: options.config.maxModelOutputChars,
       headLines: options.config.headLines,
       tailLines: options.config.tailLines,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     checks.push(check);
     if (!check.passed) {
@@ -67,6 +69,7 @@ interface RunCheckOptions {
   maxModelOutputChars: number;
   headLines: number;
   tailLines: number;
+  signal?: AbortSignal;
 }
 
 async function runCheck(options: RunCheckOptions): Promise<VerificationCheckResult> {
@@ -110,9 +113,15 @@ async function runCheck(options: RunCheckOptions): Promise<VerificationCheckResu
     child.stdout.pipe(stdoutFile);
     child.stderr.pipe(stderrFile);
 
-    const completed = waitForChild(child, options.command.timeoutMs, detached, () => {
-      timedOut = true;
-    });
+    const completed = waitForChild(
+      child,
+      options.command.timeoutMs,
+      detached,
+      () => {
+        timedOut = true;
+      },
+      options.signal,
+    );
     const completion = await completed;
     exitCode = completion.spawnError ? null : completion.exitCode;
     spawnError = completion.spawnError;
@@ -157,6 +166,7 @@ function waitForChild(
   timeoutMs: number,
   detached: boolean,
   onTimeout: () => void,
+  signal?: AbortSignal,
 ): Promise<ChildCompletion> {
   return new Promise((resolve) => {
     let spawnError: Error | undefined;
@@ -169,12 +179,23 @@ function waitForChild(
     }, timeoutMs);
     timeout.unref();
 
+    const onAbort = () => {
+      terminateChild(child, "SIGTERM", detached);
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => terminateChild(child, "SIGKILL", detached), 1_000);
+        forceKillTimer.unref();
+      }
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+
     child.once("error", (error) => {
       spawnError = error;
     });
     child.once("close", (code) => {
       clearTimeout(timeout);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      signal?.removeEventListener("abort", onAbort);
       resolve({ exitCode: code, spawnError });
     });
   });
